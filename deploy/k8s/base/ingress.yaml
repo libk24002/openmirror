@@ -1,0 +1,32 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: openmirror
+  labels:
+    app: openmirror
+spec:
+  rules:
+    - host: mirror.internal
+      http:
+        paths:
+          - path: /docker
+            pathType: Prefix
+            backend:
+              service:
+                name: openmirror
+                port:
+                  number: 80
+          - path: /npm
+            pathType: Prefix
+            backend:
+              service:
+                name: openmirror
+                port:
+                  number: 80
+          - path: /pypi
+            pathType: Prefix
+            backend:
+              service:
+                name: openmirror
+                port:
+                  number: 80
