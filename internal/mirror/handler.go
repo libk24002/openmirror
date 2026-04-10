@@ -88,7 +88,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Body:    body,
 	}
 
-	if cacheable {
+	if cacheable && isCacheableStatus(statusCode) {
 		if serialized, err := json.Marshal(cached); err == nil {
 			ttlMinutes := TTLForPath(r.URL.Path, int(h.ttl/time.Minute))
 			_ = h.cache.Set(cacheKey, cache.Entry{
@@ -103,6 +103,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func isCacheableMethod(method string) bool {
 	return method == http.MethodGet || method == http.MethodHead
+}
+
+func isCacheableStatus(statusCode int) bool {
+	return statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices
 }
 
 func buildCacheKey(r *http.Request) string {

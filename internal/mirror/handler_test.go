@@ -183,3 +183,44 @@ func TestHandlerCacheKeyVariesByMethodQueryAndAccept(t *testing.T) {
 		t.Fatalf("upstream hit count = %d, want %d", got, 3)
 	}
 }
+
+func TestHandlerDoesNotCacheUpstreamServerErrors(t *testing.T) {
+	var upstreamHits atomic.Int32
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"temporary failure"}`))
+	}))
+	defer upstream.Close()
+
+	c := cache.NewFSCache(t.TempDir())
+	h := NewHandler(c, upstream.URL, time.Hour)
+
+	firstReq := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
+	firstRec := httptest.NewRecorder()
+	h.ServeHTTP(firstRec, firstReq)
+
+	if firstRec.Code != http.StatusInternalServerError {
+		t.Fatalf("first status = %d, want %d", firstRec.Code, http.StatusInternalServerError)
+	}
+	if got := firstRec.Body.String(); got != `{"error":"temporary failure"}` {
+		t.Fatalf("first body = %q, want %q", got, `{"error":"temporary failure"}`)
+	}
+
+	secondReq := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
+	secondRec := httptest.NewRecorder()
+	h.ServeHTTP(secondRec, secondReq)
+
+	if secondRec.Code != http.StatusInternalServerError {
+		t.Fatalf("second status = %d, want %d", secondRec.Code, http.StatusInternalServerError)
+	}
+	if got := secondRec.Body.String(); got != `{"error":"temporary failure"}` {
+		t.Fatalf("second body = %q, want %q", got, `{"error":"temporary failure"}`)
+	}
+
+	if got := upstreamHits.Load(); got != 2 {
+		t.Fatalf("upstream hit count = %d, want %d", got, 2)
+	}
+}
