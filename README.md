@@ -28,6 +28,15 @@ docker run --rm -p 8080:8080 -v $(pwd)/.cache:/var/cache/openmirror openmirror:l
 
 ### Deploy to Kubernetes
 
+Build and push the image before applying manifests. The base deployment references `ghcr.io/libk24002/openmirror:latest`.
+
+```bash
+docker build -t ghcr.io/libk24002/openmirror:latest .
+docker push ghcr.io/libk24002/openmirror:latest
+```
+
+If you want to deploy a different registry or tag, update the `image` field in `deploy/k8s/base/deployment.yaml` before applying.
+
 ```bash
 kubectl apply -f deploy/k8s/base
 ```

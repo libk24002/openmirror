@@ -14,10 +14,19 @@ spec:
       labels:
         app: openmirror
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
       containers:
         - name: openmirror
-          image: openmirror:latest
+          image: ghcr.io/libk24002/openmirror:latest
           imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
           ports:
             - name: http
               containerPort: 8080
