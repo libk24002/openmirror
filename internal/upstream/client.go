@@ -27,8 +27,17 @@ func NewClient(timeout time.Duration) *Client {
 }
 
 func (c *Client) Fetch(ctx context.Context, url string) (int, http.Header, []byte, error) {
-	v, err, _ := c.group.Do(url, func() (interface{}, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	resultCh := c.group.DoChan(url, func() (interface{}, error) {
+		requestCtx := context.Background()
+		cancel := func() {}
+		if timeout := c.httpClient.Timeout; timeout > 0 {
+			requestCtx, cancel = context.WithTimeout(requestCtx, timeout)
+		} else {
+			requestCtx, cancel = context.WithCancel(requestCtx)
+		}
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, url, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -50,12 +59,18 @@ func (c *Client) Fetch(ctx context.Context, url string) (int, http.Header, []byt
 			body:       body,
 		}, nil
 	})
-	if err != nil {
-		return 0, nil, nil, err
+
+	select {
+	case <-ctx.Done():
+		return 0, nil, nil, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return 0, nil, nil, result.Err
+		}
+
+		fetch := result.Val.(fetchResult)
+		body := append([]byte(nil), fetch.body...)
+
+		return fetch.statusCode, fetch.headers.Clone(), body, nil
 	}
-
-	result := v.(fetchResult)
-	body := append([]byte(nil), result.body...)
-
-	return result.statusCode, result.headers.Clone(), body, nil
 }
