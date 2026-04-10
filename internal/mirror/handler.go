@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,9 +38,10 @@ type handler struct {
 }
 
 type cachedResponse struct {
-	Status  int         `json:"status"`
-	Headers http.Header `json:"headers"`
-	Body    []byte      `json:"body"`
+	Status     int         `json:"status"`
+	Headers    http.Header `json:"headers"`
+	Body       []byte      `json:"body"`
+	BlobBacked bool        `json:"blob_backed"`
 }
 
 func NewHandler(c *cache.FSCache, upstreamBase string, ttl time.Duration) http.Handler {
@@ -62,12 +66,18 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cacheable := isCacheableMethod(r.Method) && !hasRangeHeader(r.Header)
 	largeArtifactPath := IsLargeArtifactPath(r.URL.Path)
 
-	if cacheable && !largeArtifactPath {
+	if cacheable {
 		if entry, ok, err := h.cache.Get(cacheKey); err == nil && ok {
 			var cached cachedResponse
 			if err := json.Unmarshal(entry.Value, &cached); err == nil {
-				writeResponse(w, cached)
-				return
+				if !largeArtifactPath {
+					writeResponse(w, cached)
+					return
+				}
+
+				if cached.BlobBacked && writeBlobResponse(w, r.Method, cached, h.cache.BlobPath(cacheKey)) {
+					return
+				}
 			}
 		}
 	}
@@ -78,25 +88,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if largeArtifactPath {
-		upstreamResp, err := h.upstreamClient.DoRequest(r.Context(), upstream.Request{
-			Method:  r.Method,
-			URL:     upstreamURL,
-			Headers: requestHeadersForUpstream(r.Header),
-		})
-		if err != nil {
-			http.Error(w, "bad gateway", http.StatusBadGateway)
-			return
-		}
-		defer upstreamResp.Body.Close()
-
-		for key, values := range responseHeadersForDownstream(upstreamResp.Header) {
-			for _, value := range values {
-				w.Header().Add(key, value)
-			}
-		}
-
-		w.WriteHeader(upstreamResp.StatusCode)
-		_, _ = io.Copy(w, upstreamResp.Body)
+		h.serveLargeArtifact(w, r, cacheKey, cacheable, upstreamURL)
 		return
 	}
 
@@ -228,4 +220,110 @@ func writeResponse(w http.ResponseWriter, response cachedResponse) {
 
 	w.WriteHeader(response.Status)
 	_, _ = w.Write(response.Body)
+}
+
+func writeBlobResponse(w http.ResponseWriter, method string, response cachedResponse, blobPath string) bool {
+	blobFile, err := os.Open(blobPath)
+	if err != nil {
+		return false
+	}
+	defer blobFile.Close()
+
+	blobInfo, err := blobFile.Stat()
+	if err != nil || !blobInfo.Mode().IsRegular() {
+		return false
+	}
+	if contentLengthValue := strings.TrimSpace(response.Headers.Get("Content-Length")); contentLengthValue != "" {
+		contentLength, err := strconv.ParseInt(contentLengthValue, 10, 64)
+		if err != nil || contentLength < 0 || blobInfo.Size() != contentLength {
+			return false
+		}
+	}
+
+	for key, values := range response.Headers {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	w.WriteHeader(response.Status)
+	if method == http.MethodHead {
+		return true
+	}
+
+	_, _ = io.Copy(w, blobFile)
+	return true
+}
+
+func (h *handler) serveLargeArtifact(w http.ResponseWriter, r *http.Request, cacheKey string, cacheable bool, upstreamURL string) {
+	upstreamResp, err := h.upstreamClient.DoRequest(r.Context(), upstream.Request{
+		Method:  r.Method,
+		URL:     upstreamURL,
+		Headers: requestHeadersForUpstream(r.Header),
+	})
+	if err != nil {
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+		return
+	}
+	defer upstreamResp.Body.Close()
+
+	filteredHeaders := responseHeadersForDownstream(upstreamResp.Header)
+	for key, values := range filteredHeaders {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(upstreamResp.StatusCode)
+
+	if !cacheable || !isCacheableStatus(upstreamResp.StatusCode) {
+		_, _ = io.Copy(w, upstreamResp.Body)
+		return
+	}
+
+	blobPath := h.cache.BlobPath(cacheKey)
+	blobDir := filepath.Dir(blobPath)
+	if err := os.MkdirAll(blobDir, 0o755); err != nil {
+		_, _ = io.Copy(w, upstreamResp.Body)
+		return
+	}
+
+	tmpBlob, err := os.CreateTemp(blobDir, filepath.Base(blobPath)+".tmp-*")
+	if err != nil {
+		_, _ = io.Copy(w, upstreamResp.Body)
+		return
+	}
+	tmpBlobPath := tmpBlob.Name()
+	defer func() {
+		_ = os.Remove(tmpBlobPath)
+	}()
+
+	_, copyErr := io.Copy(io.MultiWriter(w, tmpBlob), upstreamResp.Body)
+	closeErr := tmpBlob.Close()
+	if copyErr != nil || closeErr != nil {
+		return
+	}
+	if err := os.Chmod(tmpBlobPath, 0o644); err != nil {
+		return
+	}
+	if err := os.Rename(tmpBlobPath, blobPath); err != nil {
+		return
+	}
+
+	serialized, err := json.Marshal(cachedResponse{
+		Status:     upstreamResp.StatusCode,
+		Headers:    filteredHeaders,
+		BlobBacked: true,
+	})
+	if err != nil {
+		_ = os.Remove(blobPath)
+		return
+	}
+
+	ttlMinutes := TTLForPath(r.URL.Path, int(h.ttl/time.Minute))
+	if err := h.cache.Set(cacheKey, cache.Entry{
+		Value:    serialized,
+		ExpireAt: time.Now().Add(time.Duration(ttlMinutes) * time.Minute),
+	}); err != nil {
+		_ = os.Remove(blobPath)
+	}
 }

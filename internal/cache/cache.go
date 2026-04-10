@@ -84,7 +84,14 @@ func (c *FSCache) Get(key string) (Entry, bool, error) {
 }
 
 func (c *FSCache) pathForKey(key string) string {
+	return filepath.Join(c.root, c.nameForKey(key)+".json")
+}
+
+func (c *FSCache) BlobPath(key string) string {
+	return filepath.Join(c.root, c.nameForKey(key)+".blob")
+}
+
+func (c *FSCache) nameForKey(key string) string {
 	sum := sha256.Sum256([]byte(key))
-	name := hex.EncodeToString(sum[:])
-	return filepath.Join(c.root, name+".json")
+	return hex.EncodeToString(sum[:])
 }

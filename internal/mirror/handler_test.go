@@ -1,8 +1,10 @@
 package mirror
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -345,6 +347,16 @@ func TestHandlerRangeRequestsAreNotCached(t *testing.T) {
 	if got := upstreamHits.Load(); got != 2 {
 		t.Fatalf("upstream hit count = %d, want %d", got, 2)
 	}
+
+	cacheKey := buildCacheKey(firstReq)
+	if _, ok, err := c.Get(cacheKey); err != nil {
+		t.Fatalf("cache get returned error: %v", err)
+	} else if ok {
+		t.Fatal("expected range response metadata to bypass cache")
+	}
+	if _, err := os.Stat(c.BlobPath(cacheKey)); !os.IsNotExist(err) {
+		t.Fatalf("expected range response blob cache miss, stat err = %v", err)
+	}
 }
 
 func TestHandlerDoesNotCache206Responses(t *testing.T) {
@@ -381,13 +393,15 @@ func TestHandlerDoesNotCache206Responses(t *testing.T) {
 	}
 }
 
-func TestHandlerLargeArtifactPathsBypassCache(t *testing.T) {
+func TestHandlerLargeArtifactPathMissThenHitCachesBlob(t *testing.T) {
 	var upstreamHits atomic.Int32
+	body := strings.Repeat("blob-bytes-", 64)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamHits.Add(1)
+		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("blob-bytes"))
+		_, _ = w.Write([]byte(body))
 	}))
 	defer upstream.Close()
 
@@ -401,15 +415,38 @@ func TestHandlerLargeArtifactPathsBypassCache(t *testing.T) {
 	if firstRec.Code != http.StatusOK {
 		t.Fatalf("first status = %d, want %d", firstRec.Code, http.StatusOK)
 	}
-	if got := firstRec.Body.String(); got != "blob-bytes" {
-		t.Fatalf("first body = %q, want %q", got, "blob-bytes")
+	if got := firstRec.Body.String(); got != body {
+		t.Fatalf("first body = %q, want %q", got, body)
 	}
 
 	cacheKey := buildCacheKey(firstReq)
 	if _, ok, err := c.Get(cacheKey); err != nil {
 		t.Fatalf("cache get returned error: %v", err)
-	} else if ok {
-		t.Fatal("expected large artifact response to bypass cache write")
+	} else if !ok {
+		t.Fatal("expected large artifact metadata to be cached")
+	}
+
+	entry, _, err := c.Get(cacheKey)
+	if err != nil {
+		t.Fatalf("cache get for metadata returned error: %v", err)
+	}
+	var cached cachedResponse
+	if err := json.Unmarshal(entry.Value, &cached); err != nil {
+		t.Fatalf("unmarshal cached metadata: %v", err)
+	}
+	if !cached.BlobBacked {
+		t.Fatal("expected cached metadata to be blob-backed")
+	}
+	if len(cached.Body) != 0 {
+		t.Fatalf("cached body length = %d, want 0 for blob-backed entries", len(cached.Body))
+	}
+
+	blobBody, err := os.ReadFile(c.BlobPath(cacheKey))
+	if err != nil {
+		t.Fatalf("read blob cache file: %v", err)
+	}
+	if got := string(blobBody); got != body {
+		t.Fatalf("blob file body = %q, want %q", got, body)
 	}
 
 	secondReq := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/sha256:abc", nil)
@@ -419,10 +456,130 @@ func TestHandlerLargeArtifactPathsBypassCache(t *testing.T) {
 	if secondRec.Code != http.StatusOK {
 		t.Fatalf("second status = %d, want %d", secondRec.Code, http.StatusOK)
 	}
-	if got := secondRec.Body.String(); got != "blob-bytes" {
-		t.Fatalf("second body = %q, want %q", got, "blob-bytes")
+	if got := secondRec.Body.String(); got != body {
+		t.Fatalf("second body = %q, want %q", got, body)
 	}
 
+	if got := upstreamHits.Load(); got != 1 {
+		t.Fatalf("upstream hit count = %d, want %d", got, 1)
+	}
+}
+
+func TestHandlerLargeArtifactCacheHitServesSameBodyWithUpstreamOffline(t *testing.T) {
+	body := strings.Repeat("layer-", 32)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+	}))
+
+	c := cache.NewFSCache(t.TempDir())
+	h := NewHandler(c, upstream.URL, time.Hour)
+
+	firstReq := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/sha256:cached", nil)
+	firstRec := httptest.NewRecorder()
+	h.ServeHTTP(firstRec, firstReq)
+
+	if firstRec.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want %d", firstRec.Code, http.StatusOK)
+	}
+	if got := firstRec.Body.String(); got != body {
+		t.Fatalf("first body = %q, want %q", got, body)
+	}
+
+	upstream.Close()
+
+	secondReq := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/sha256:cached", nil)
+	secondRec := httptest.NewRecorder()
+	h.ServeHTTP(secondRec, secondReq)
+
+	if secondRec.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want %d", secondRec.Code, http.StatusOK)
+	}
+	if got := secondRec.Body.String(); got != body {
+		t.Fatalf("second body = %q, want %q", got, body)
+	}
+}
+
+func TestHandlerLargeArtifactMissingBlobFallsBackToUpstream(t *testing.T) {
+	var upstreamHits atomic.Int32
+	body := strings.Repeat("blob-", 48)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer upstream.Close()
+
+	c := cache.NewFSCache(t.TempDir())
+	h := NewHandler(c, upstream.URL, time.Hour)
+
+	firstReq := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/sha256:missing", nil)
+	firstRec := httptest.NewRecorder()
+	h.ServeHTTP(firstRec, firstReq)
+
+	if firstRec.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want %d", firstRec.Code, http.StatusOK)
+	}
+
+	cacheKey := buildCacheKey(firstReq)
+	if err := os.Remove(c.BlobPath(cacheKey)); err != nil {
+		t.Fatalf("remove blob cache file: %v", err)
+	}
+
+	secondReq := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/sha256:missing", nil)
+	secondRec := httptest.NewRecorder()
+	h.ServeHTTP(secondRec, secondReq)
+
+	if secondRec.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want %d", secondRec.Code, http.StatusOK)
+	}
+	if got := secondRec.Body.String(); got != body {
+		t.Fatalf("second body = %q, want %q", got, body)
+	}
+	if got := upstreamHits.Load(); got != 2 {
+		t.Fatalf("upstream hit count = %d, want %d", got, 2)
+	}
+}
+
+func TestHandlerLargeArtifactCorruptBlobFallsBackToUpstream(t *testing.T) {
+	var upstreamHits atomic.Int32
+	body := strings.Repeat("layer-data-", 40)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer upstream.Close()
+
+	c := cache.NewFSCache(t.TempDir())
+	h := NewHandler(c, upstream.URL, time.Hour)
+
+	firstReq := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/sha256:corrupt", nil)
+	firstRec := httptest.NewRecorder()
+	h.ServeHTTP(firstRec, firstReq)
+
+	if firstRec.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want %d", firstRec.Code, http.StatusOK)
+	}
+
+	cacheKey := buildCacheKey(firstReq)
+	if err := os.WriteFile(c.BlobPath(cacheKey), []byte("corrupt"), 0o644); err != nil {
+		t.Fatalf("overwrite blob cache file: %v", err)
+	}
+
+	secondReq := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/sha256:corrupt", nil)
+	secondRec := httptest.NewRecorder()
+	h.ServeHTTP(secondRec, secondReq)
+
+	if secondRec.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want %d", secondRec.Code, http.StatusOK)
+	}
+	if got := secondRec.Body.String(); got != body {
+		t.Fatalf("second body = %q, want %q", got, body)
+	}
 	if got := upstreamHits.Load(); got != 2 {
 		t.Fatalf("upstream hit count = %d, want %d", got, 2)
 	}

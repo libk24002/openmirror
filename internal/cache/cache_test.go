@@ -2,6 +2,7 @@ package cache
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -75,5 +76,25 @@ func TestFSCacheGetCorruptEntryReturnsMiss(t *testing.T) {
 	}
 	if ok {
 		t.Fatalf("Get returned hit for corrupt entry: %+v", entry)
+	}
+}
+
+func TestFSCacheBlobPathDeterministicByKey(t *testing.T) {
+	root := t.TempDir()
+	c := NewFSCache(root)
+
+	key := "docker/library/alpine"
+	first := c.BlobPath(key)
+	second := c.BlobPath(key)
+	other := c.BlobPath("docker/library/busybox")
+
+	if first != second {
+		t.Fatalf("BlobPath should be deterministic: %q != %q", first, second)
+	}
+	if first == other {
+		t.Fatalf("BlobPath should differ by key: %q == %q", first, other)
+	}
+	if filepath.Ext(first) != ".blob" {
+		t.Fatalf("BlobPath extension = %q, want %q", filepath.Ext(first), ".blob")
 	}
 }
