@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -278,6 +279,51 @@ func TestFetchFollowerCancellationReturnsQuickly(t *testing.T) {
 
 	if got := hits.Load(); got != 1 {
 		t.Fatalf("expected exactly 1 upstream request, got %d", got)
+	}
+}
+
+func TestDoRequestReturnsStreamingResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("upstream method = %q, want %q", r.Method, http.MethodGet)
+		}
+		if got := r.Header.Get("Accept"); got != "application/octet-stream" {
+			t.Fatalf("upstream accept = %q, want %q", got, "application/octet-stream")
+		}
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("streamed"))
+	}))
+	defer server.Close()
+
+	client := NewClient(2 * time.Second)
+	headers := make(http.Header)
+	headers.Set("Accept", "application/octet-stream")
+
+	resp, err := client.DoRequest(context.Background(), Request{
+		Method:  http.MethodGet,
+		URL:     server.URL,
+		Headers: headers,
+	})
+	if err != nil {
+		t.Fatalf("DoRequest returned error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/octet-stream" {
+		t.Fatalf("content-type = %q, want %q", got, "application/octet-stream")
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading body returned error: %v", err)
+	}
+	if string(body) != "streamed" {
+		t.Fatalf("body = %q, want %q", string(body), "streamed")
 	}
 }
 

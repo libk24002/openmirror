@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -59,8 +60,9 @@ func NewHandlerWithClient(c *cache.FSCache, client *upstream.Client, upstreamBas
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cacheKey := buildCacheKey(r)
 	cacheable := isCacheableMethod(r.Method) && !hasRangeHeader(r.Header)
+	largeArtifactPath := IsLargeArtifactPath(r.URL.Path)
 
-	if cacheable {
+	if cacheable && !largeArtifactPath {
 		if entry, ok, err := h.cache.Get(cacheKey); err == nil && ok {
 			var cached cachedResponse
 			if err := json.Unmarshal(entry.Value, &cached); err == nil {
@@ -73,6 +75,29 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	upstreamURL := h.upstreamBase + r.URL.Path
 	if r.URL.RawQuery != "" {
 		upstreamURL += "?" + r.URL.RawQuery
+	}
+
+	if largeArtifactPath {
+		upstreamResp, err := h.upstreamClient.DoRequest(r.Context(), upstream.Request{
+			Method:  r.Method,
+			URL:     upstreamURL,
+			Headers: requestHeadersForUpstream(r.Header),
+		})
+		if err != nil {
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
+		}
+		defer upstreamResp.Body.Close()
+
+		for key, values := range responseHeadersForDownstream(upstreamResp.Header) {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+
+		w.WriteHeader(upstreamResp.StatusCode)
+		_, _ = io.Copy(w, upstreamResp.Body)
+		return
 	}
 
 	statusCode, headers, body, err := h.upstreamClient.FetchRequest(r.Context(), upstream.Request{

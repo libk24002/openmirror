@@ -29,6 +29,17 @@ type fetchResult struct {
 	body       []byte
 }
 
+type cancelOnCloseReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (r *cancelOnCloseReadCloser) Close() error {
+	err := r.ReadCloser.Close()
+	r.cancel()
+	return err
+}
+
 func NewClient(timeout time.Duration) *Client {
 	return &Client{
 		httpClient: &http.Client{Timeout: timeout},
@@ -39,25 +50,27 @@ func (c *Client) Fetch(ctx context.Context, url string) (int, http.Header, []byt
 	return c.FetchRequest(ctx, Request{Method: http.MethodGet, URL: url})
 }
 
+func (c *Client) DoRequest(ctx context.Context, request Request) (*http.Response, error) {
+	normalized := normalizeRequest(request)
+
+	requestCtx, cancel := c.timeoutContext(ctx)
+	resp, err := c.doRequest(requestCtx, normalized)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+
+	resp.Body = &cancelOnCloseReadCloser{ReadCloser: resp.Body, cancel: cancel}
+	return resp, nil
+}
+
 func (c *Client) FetchRequest(ctx context.Context, request Request) (int, http.Header, []byte, error) {
 	normalized := normalizeRequest(request)
 	resultCh := c.group.DoChan(singleflightKey(normalized), func() (interface{}, error) {
-		requestCtx := context.Background()
-		cancel := func() {}
-		if timeout := c.httpClient.Timeout; timeout > 0 {
-			requestCtx, cancel = context.WithTimeout(requestCtx, timeout)
-		} else {
-			requestCtx, cancel = context.WithCancel(requestCtx)
-		}
+		requestCtx, cancel := c.timeoutContext(context.Background())
 		defer cancel()
 
-		req, err := http.NewRequestWithContext(requestCtx, normalized.Method, normalized.URL, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header = normalized.Headers.Clone()
-
-		resp, err := c.httpClient.Do(req)
+		resp, err := c.doRequest(requestCtx, normalized)
 		if err != nil {
 			return nil, err
 		}
@@ -88,6 +101,24 @@ func (c *Client) FetchRequest(ctx context.Context, request Request) (int, http.H
 
 		return fetch.statusCode, fetch.headers.Clone(), body, nil
 	}
+}
+
+func (c *Client) timeoutContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if timeout := c.httpClient.Timeout; timeout > 0 {
+		return context.WithTimeout(parent, timeout)
+	}
+
+	return context.WithCancel(parent)
+}
+
+func (c *Client) doRequest(ctx context.Context, request Request) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, request.Method, request.URL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header = request.Headers.Clone()
+
+	return c.httpClient.Do(req)
 }
 
 func normalizeRequest(request Request) Request {
