@@ -3,6 +3,7 @@ package mirror
 import (
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -222,5 +223,80 @@ func TestHandlerDoesNotCacheUpstreamServerErrors(t *testing.T) {
 
 	if got := upstreamHits.Load(); got != 2 {
 		t.Fatalf("upstream hit count = %d, want %d", got, 2)
+	}
+}
+
+func TestHandlerForwardsUpstreamAuthChallengeHeaders(t *testing.T) {
+	challengeHeaders := []string{
+		`Bearer realm="https://auth.example/token",service="registry.example.com"`,
+		`Basic realm="registry.example.com"`,
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, challenge := range challengeHeaders {
+			w.Header().Add("WWW-Authenticate", challenge)
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer upstream.Close()
+
+	c := cache.NewFSCache(t.TempDir())
+	h := NewHandler(c, upstream.URL, time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	if got := rec.Result().Header.Values("WWW-Authenticate"); !reflect.DeepEqual(got, challengeHeaders) {
+		t.Fatalf("WWW-Authenticate = %#v, want %#v", got, challengeHeaders)
+	}
+}
+
+func TestHandlerCacheHitPreservesAuthChallengeHeaders(t *testing.T) {
+	var upstreamHits atomic.Int32
+	challengeHeaders := []string{
+		`Bearer realm="https://auth.example/token",service="registry.example.com"`,
+		`Basic realm="registry.example.com"`,
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		for _, challenge := range challengeHeaders {
+			w.Header().Add("WWW-Authenticate", challenge)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	c := cache.NewFSCache(t.TempDir())
+	h := NewHandler(c, upstream.URL, time.Minute)
+
+	firstReq := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
+	firstRec := httptest.NewRecorder()
+	h.ServeHTTP(firstRec, firstReq)
+
+	if firstRec.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want %d", firstRec.Code, http.StatusOK)
+	}
+	if got := firstRec.Result().Header.Values("WWW-Authenticate"); !reflect.DeepEqual(got, challengeHeaders) {
+		t.Fatalf("first WWW-Authenticate = %#v, want %#v", got, challengeHeaders)
+	}
+
+	secondReq := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
+	secondRec := httptest.NewRecorder()
+	h.ServeHTTP(secondRec, secondReq)
+
+	if secondRec.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want %d", secondRec.Code, http.StatusOK)
+	}
+	if got := secondRec.Result().Header.Values("WWW-Authenticate"); !reflect.DeepEqual(got, challengeHeaders) {
+		t.Fatalf("second WWW-Authenticate = %#v, want %#v", got, challengeHeaders)
+	}
+	if got := upstreamHits.Load(); got != 1 {
+		t.Fatalf("upstream hit count = %d, want %d", got, 1)
 	}
 }

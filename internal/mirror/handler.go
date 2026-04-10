@@ -14,13 +14,16 @@ import (
 
 const defaultUpstreamTimeout = 20 * time.Second
 
-var forwardedResponseHeaders = []string{
-	"Content-Type",
-	"Content-Length",
-	"ETag",
-	"Cache-Control",
-	"Last-Modified",
-	"Docker-Content-Digest",
+var hopByHopResponseHeaders = map[string]struct{}{
+	"Connection":          {},
+	"Proxy-Connection":    {},
+	"Keep-Alive":          {},
+	"Transfer-Encoding":   {},
+	"Upgrade":             {},
+	"TE":                  {},
+	"Trailer":             {},
+	"Proxy-Authenticate":  {},
+	"Proxy-Authorization": {},
 }
 
 type handler struct {
@@ -142,15 +145,45 @@ func requestHeadersForUpstream(headers http.Header) http.Header {
 }
 
 func responseHeadersForDownstream(headers http.Header) http.Header {
-	forwarded := make(http.Header, len(forwardedResponseHeaders))
-	for _, key := range forwardedResponseHeaders {
-		values := headers.Values(key)
+	forwarded := make(http.Header, len(headers))
+	connectionScopedHeaders := parseConnectionHeaderTokens(headers)
+
+	for key, values := range headers {
 		if len(values) == 0 {
 			continue
 		}
+		if isHopByHopHeader(key) {
+			continue
+		}
+		if _, listedInConnection := connectionScopedHeaders[http.CanonicalHeaderKey(key)]; listedInConnection {
+			continue
+		}
+
 		forwarded[key] = append([]string(nil), values...)
 	}
+
 	return forwarded
+}
+
+func isHopByHopHeader(headerName string) bool {
+	_, ok := hopByHopResponseHeaders[http.CanonicalHeaderKey(headerName)]
+	return ok
+}
+
+func parseConnectionHeaderTokens(headers http.Header) map[string]struct{} {
+	connectionTokens := make(map[string]struct{})
+	for _, value := range headers.Values("Connection") {
+		tokens := strings.Split(value, ",")
+		for _, token := range tokens {
+			token = strings.TrimSpace(token)
+			if token == "" {
+				continue
+			}
+			connectionTokens[http.CanonicalHeaderKey(token)] = struct{}{}
+		}
+	}
+
+	return connectionTokens
 }
 
 func writeResponse(w http.ResponseWriter, response cachedResponse) {
