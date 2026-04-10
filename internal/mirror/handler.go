@@ -58,7 +58,7 @@ func NewHandlerWithClient(c *cache.FSCache, client *upstream.Client, upstreamBas
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cacheKey := buildCacheKey(r)
-	cacheable := isCacheableMethod(r.Method)
+	cacheable := isCacheableMethod(r.Method) && !hasRangeHeader(r.Header)
 
 	if cacheable {
 		if entry, ok, err := h.cache.Get(cacheKey); err == nil && ok {
@@ -109,7 +109,15 @@ func isCacheableMethod(method string) bool {
 }
 
 func isCacheableStatus(statusCode int) bool {
+	if statusCode == http.StatusPartialContent {
+		return false
+	}
+
 	return statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices
+}
+
+func hasRangeHeader(headers http.Header) bool {
+	return strings.TrimSpace(headers.Get("Range")) != ""
 }
 
 func buildCacheKey(r *http.Request) string {

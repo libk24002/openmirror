@@ -25,9 +25,10 @@ func LoadFromEnv() Config {
 		RequestTimeout: 20 * time.Second,
 		MetadataTTL:    10 * time.Minute,
 		Routes: map[string]Route{
-			"docker": {Upstream: "https://registry-1.docker.io"},
-			"npm":    {Upstream: "https://registry.npmjs.org"},
-			"pypi":   {Upstream: "https://pypi.org"},
+			"docker":    {Upstream: "https://registry-1.docker.io"},
+			"npm":       {Upstream: "https://registry.npmjs.org"},
+			"pypi":      {Upstream: "https://pypi.org"},
+			"pypiFiles": {Upstream: "https://files.pythonhosted.org"},
 		},
 	}
 

@@ -300,3 +300,76 @@ func TestHandlerCacheHitPreservesAuthChallengeHeaders(t *testing.T) {
 		t.Fatalf("upstream hit count = %d, want %d", got, 1)
 	}
 }
+
+func TestHandlerRangeRequestsAreNotCached(t *testing.T) {
+	var upstreamHits atomic.Int32
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		if got := r.Header.Get("Range"); got != "bytes=0-9" {
+			t.Fatalf("upstream range = %q, want %q", got, "bytes=0-9")
+		}
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("partial"))
+	}))
+	defer upstream.Close()
+
+	c := cache.NewFSCache(t.TempDir())
+	h := NewHandler(c, upstream.URL, time.Hour)
+
+	firstReq := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/sha256:abc", nil)
+	firstReq.Header.Set("Range", "bytes=0-9")
+	firstRec := httptest.NewRecorder()
+	h.ServeHTTP(firstRec, firstReq)
+
+	if firstRec.Code != http.StatusPartialContent {
+		t.Fatalf("first status = %d, want %d", firstRec.Code, http.StatusPartialContent)
+	}
+
+	secondReq := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/sha256:abc", nil)
+	secondReq.Header.Set("Range", "bytes=0-9")
+	secondRec := httptest.NewRecorder()
+	h.ServeHTTP(secondRec, secondReq)
+
+	if secondRec.Code != http.StatusPartialContent {
+		t.Fatalf("second status = %d, want %d", secondRec.Code, http.StatusPartialContent)
+	}
+
+	if got := upstreamHits.Load(); got != 2 {
+		t.Fatalf("upstream hit count = %d, want %d", got, 2)
+	}
+}
+
+func TestHandlerDoesNotCache206Responses(t *testing.T) {
+	var upstreamHits atomic.Int32
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("partial"))
+	}))
+	defer upstream.Close()
+
+	c := cache.NewFSCache(t.TempDir())
+	h := NewHandler(c, upstream.URL, time.Hour)
+
+	firstReq := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/sha256:def", nil)
+	firstRec := httptest.NewRecorder()
+	h.ServeHTTP(firstRec, firstReq)
+
+	if firstRec.Code != http.StatusPartialContent {
+		t.Fatalf("first status = %d, want %d", firstRec.Code, http.StatusPartialContent)
+	}
+
+	secondReq := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/sha256:def", nil)
+	secondRec := httptest.NewRecorder()
+	h.ServeHTTP(secondRec, secondReq)
+
+	if secondRec.Code != http.StatusPartialContent {
+		t.Fatalf("second status = %d, want %d", secondRec.Code, http.StatusPartialContent)
+	}
+
+	if got := upstreamHits.Load(); got != 2 {
+		t.Fatalf("upstream hit count = %d, want %d", got, 2)
+	}
+}

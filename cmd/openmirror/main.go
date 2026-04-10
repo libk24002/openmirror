@@ -28,12 +28,19 @@ func main() {
 		cfg.Routes["npm"].Upstream,
 		cfg.MetadataTTL,
 	)
-	pypiHandler := mirror.NewHandlerWithClient(
+	pypiIndexHandler := mirror.NewHandlerWithClient(
 		cache.NewFSCache(filepath.Join(cfg.CacheDir, "pypi")),
 		upstreamClient,
 		cfg.Routes["pypi"].Upstream,
 		cfg.MetadataTTL,
 	)
+	pypiFilesHandler := mirror.NewHandlerWithClient(
+		cache.NewFSCache(filepath.Join(cfg.CacheDir, "pypiFiles")),
+		upstreamClient,
+		cfg.Routes["pypiFiles"].Upstream,
+		cfg.MetadataTTL,
+	)
+	pypiHandler := mirror.NewPyPIHandler(pypiIndexHandler, pypiFilesHandler)
 
 	router := server.NewRouterWithMirrors(dockerHandler, npmHandler, pypiHandler)
 	log.Fatal(http.ListenAndServe(cfg.Addr, router))
