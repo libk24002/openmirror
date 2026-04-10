@@ -1,6 +1,10 @@
 package server
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/libk24002/openmirror/internal/observability"
+)
 
 func NewRouter() http.Handler {
 	return NewRouterWithMirrors(http.NotFoundHandler(), http.NotFoundHandler(), http.NotFoundHandler())
@@ -13,6 +17,7 @@ func NewRouterWithMirrors(docker, npm, pypi http.Handler) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	router.Handle("/metrics", observability.Handler())
 
 	router.Handle("/docker/", http.StripPrefix("/docker", nonNilHandler(docker)))
 	router.Handle("/npm/", http.StripPrefix("/npm", nonNilHandler(npm)))
