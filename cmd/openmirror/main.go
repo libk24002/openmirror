@@ -16,12 +16,12 @@ func main() {
 	cfg := config.LoadFromEnv()
 	upstreamClient := upstream.NewClient(cfg.RequestTimeout)
 
-	dockerHandler := mirror.NewHandlerWithClient(
+	dockerHandler := mirror.NewDockerCompatHandler(mirror.NewHandlerWithClient(
 		cache.NewFSCache(filepath.Join(cfg.CacheDir, "docker")),
 		upstreamClient,
 		cfg.Routes["docker"].Upstream,
 		cfg.MetadataTTL,
-	)
+	))
 	npmHandler := mirror.NewHandlerWithClient(
 		cache.NewFSCache(filepath.Join(cfg.CacheDir, "npm")),
 		upstreamClient,

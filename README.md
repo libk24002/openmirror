@@ -45,8 +45,14 @@ kubectl apply -f deploy/k8s/base
 
 - `GET /healthz` - health check
 - `GET /metrics` - Prometheus metrics
-- `/docker/*` - Docker/OCI mirror path
+- `/v2/*` - Docker Registry-compatible mirror path
 - `/npm/*` - npm mirror path
 - `/pypi/*` - PyPI mirror path
 
-For Kubernetes ingress, the default host in this repo is `mirror.internal`, with `/docker`, `/npm`, and `/pypi` routed to the OpenMirror service.
+For Kubernetes ingress, the default host in this repo is `mirror.internal`, with `/v2`, `/npm`, and `/pypi` routed to the OpenMirror service.
+
+For Docker image pulls, use a registry-style image reference with upstream namespace in the repository name. Example:
+
+```bash
+docker pull m.lab.zverse.space/docker.io/library/nginx:latest
+```

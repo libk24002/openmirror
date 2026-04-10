@@ -9,7 +9,7 @@ spec:
     - host: mirror.internal
       http:
         paths:
-          - path: /docker
+          - path: /v2
             pathType: Prefix
             backend:
               service:

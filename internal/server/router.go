@@ -19,7 +19,7 @@ func NewRouterWithMirrors(docker, npm, pypi http.Handler) http.Handler {
 	})
 	router.Handle("/metrics", observability.Handler())
 
-	router.Handle("/docker/", http.StripPrefix("/docker", nonNilHandler(docker)))
+	router.Handle("/v2/", nonNilHandler(docker))
 	router.Handle("/npm/", http.StripPrefix("/npm", nonNilHandler(npm)))
 	router.Handle("/pypi/", http.StripPrefix("/pypi", nonNilHandler(pypi)))
 

@@ -9,9 +9,6 @@ import (
 func TestNewRouterWithMirrorsRegistersMirrorRoutes(t *testing.T) {
 	router := NewRouterWithMirrors(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/v2/library/alpine/manifests/latest" {
-				t.Fatalf("docker path = %q, want %q", r.URL.Path, "/v2/library/alpine/manifests/latest")
-			}
 			_, _ = w.Write([]byte("docker"))
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -33,7 +30,7 @@ func TestNewRouterWithMirrorsRegistersMirrorRoutes(t *testing.T) {
 		url  string
 		want string
 	}{
-		{name: "docker route", url: "/docker/v2/library/alpine/manifests/latest", want: "docker"},
+		{name: "docker v2 route", url: "/v2/docker.io/library/alpine/manifests/latest", want: "docker"},
 		{name: "npm route", url: "/npm/left-pad", want: "npm"},
 		{name: "pypi route", url: "/pypi/simple/pip/", want: "pypi"},
 	}
@@ -51,5 +48,12 @@ func TestNewRouterWithMirrorsRegistersMirrorRoutes(t *testing.T) {
 				t.Fatalf("body = %q, want %q", rec.Body.String(), tc.want)
 			}
 		})
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/docker/v2/library/alpine/manifests/latest", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("legacy /docker route status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 }
