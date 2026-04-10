@@ -90,9 +90,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if cacheable {
 		if serialized, err := json.Marshal(cached); err == nil {
+			ttlMinutes := TTLForPath(r.URL.Path, int(h.ttl/time.Minute))
 			_ = h.cache.Set(cacheKey, cache.Entry{
 				Value:    serialized,
-				ExpireAt: time.Now().Add(h.ttl),
+				ExpireAt: time.Now().Add(time.Duration(ttlMinutes) * time.Minute),
 			})
 		}
 	}
