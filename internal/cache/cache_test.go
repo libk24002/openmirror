@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"os"
 	"testing"
 	"time"
 )
@@ -51,5 +52,28 @@ func TestFSCacheSetGetWithTTL(t *testing.T) {
 	}
 	if ok {
 		t.Fatalf("Get missing returned hit: %+v", missing)
+	}
+}
+
+func TestFSCacheGetCorruptEntryReturnsMiss(t *testing.T) {
+	root := t.TempDir()
+	c := NewFSCache(root)
+
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+
+	key := "corrupt"
+	cachePath := c.pathForKey(key)
+	if err := os.WriteFile(cachePath, []byte("not-json"), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	entry, ok, err := c.Get(key)
+	if err != nil {
+		t.Fatalf("Get returned error for corrupt entry: %v", err)
+	}
+	if ok {
+		t.Fatalf("Get returned hit for corrupt entry: %+v", entry)
 	}
 }

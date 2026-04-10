@@ -33,11 +33,35 @@ func (c *FSCache) Set(key string, entry Entry) error {
 		return err
 	}
 
-	return os.WriteFile(c.pathForKey(key), body, 0o644)
+	finalPath := c.pathForKey(key)
+	dir := filepath.Dir(finalPath)
+	tmpFile, err := os.CreateTemp(dir, filepath.Base(finalPath)+".tmp-*")
+	if err != nil {
+		return err
+	}
+
+	tmpPath := tmpFile.Name()
+	defer func() {
+		_ = os.Remove(tmpPath)
+	}()
+
+	if _, err := tmpFile.Write(body); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0o644); err != nil {
+		return err
+	}
+
+	return os.Rename(tmpPath, finalPath)
 }
 
 func (c *FSCache) Get(key string) (Entry, bool, error) {
-	body, err := os.ReadFile(c.pathForKey(key))
+	path := c.pathForKey(key)
+	body, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return Entry{}, false, nil
@@ -47,7 +71,8 @@ func (c *FSCache) Get(key string) (Entry, bool, error) {
 
 	var entry Entry
 	if err := json.Unmarshal(body, &entry); err != nil {
-		return Entry{}, false, err
+		_ = os.Remove(path)
+		return Entry{}, false, nil
 	}
 
 	now := time.Now()
