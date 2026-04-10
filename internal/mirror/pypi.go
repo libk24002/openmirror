@@ -31,7 +31,9 @@ func (h *pypiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	captured := newCapturedResponseWriter()
-	h.index.ServeHTTP(captured, r)
+	forwardedRequest := r.Clone(r.Context())
+	forwardedRequest.Header.Del("Accept-Encoding")
+	h.index.ServeHTTP(captured, forwardedRequest)
 
 	headers := captured.Header().Clone()
 	body := captured.Body()

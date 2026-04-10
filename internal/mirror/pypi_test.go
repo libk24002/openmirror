@@ -1,6 +1,8 @@
 package mirror
 
 import (
+	"bytes"
+	"compress/gzip"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -92,5 +94,47 @@ func TestPyPIHandlerRoutesSimpleToIndexAndRewritesFileLinks(t *testing.T) {
 	expectedLength := strconv.Itoa(len(body))
 	if got := rec.Header().Get("Content-Length"); got != expectedLength {
 		t.Fatalf("Content-Length = %q, want %q", got, expectedLength)
+	}
+}
+
+func TestPyPIHandlerRewritesSimpleLinksWhenClientRequestsGzip(t *testing.T) {
+	indexHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamBody := []byte(`<a href="https://files.pythonhosted.org/packages/c/cc/file-3.whl">three</a>`)
+
+		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			var compressed bytes.Buffer
+			gzipWriter := gzip.NewWriter(&compressed)
+			_, _ = gzipWriter.Write(upstreamBody)
+			_ = gzipWriter.Close()
+
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Set("Content-Length", strconv.Itoa(compressed.Len()))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(compressed.Bytes())
+			return
+		}
+
+		w.Header().Set("Content-Length", strconv.Itoa(len(upstreamBody)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(upstreamBody)
+	})
+
+	h := NewPyPIHandler(indexHandler, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/simple/sample/", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	body := rec.Body.String()
+	if strings.Contains(body, "files.pythonhosted.org") {
+		t.Fatalf("body still contains files.pythonhosted.org: %q", body)
+	}
+	if !strings.Contains(body, `/pypi/packages/c/cc/file-3.whl`) {
+		t.Fatalf("body missing rewritten link: %q", body)
 	}
 }
