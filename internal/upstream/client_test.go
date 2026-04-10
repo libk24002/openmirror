@@ -11,6 +11,50 @@ import (
 	"time"
 )
 
+func TestFetchRequestForwardsMethodAndHeaders(t *testing.T) {
+	methodSeen := ""
+	acceptSeen := ""
+	authorizationSeen := ""
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methodSeen = r.Method
+		acceptSeen = r.Header.Get("Accept")
+		authorizationSeen = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := NewClient(2 * time.Second)
+
+	headers := make(http.Header)
+	headers.Set("Accept", "application/vnd.oci.image.manifest.v1+json")
+	headers.Set("Authorization", "Bearer api-token")
+
+	statusCode, _, body, err := client.FetchRequest(context.Background(), Request{
+		Method:  http.MethodHead,
+		URL:     server.URL + "?from=test",
+		Headers: headers,
+	})
+	if err != nil {
+		t.Fatalf("fetch request returned error: %v", err)
+	}
+	if statusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", statusCode, http.StatusNoContent)
+	}
+	if len(body) != 0 {
+		t.Fatalf("body len = %d, want %d", len(body), 0)
+	}
+	if methodSeen != http.MethodHead {
+		t.Fatalf("upstream method = %q, want %q", methodSeen, http.MethodHead)
+	}
+	if acceptSeen != "application/vnd.oci.image.manifest.v1+json" {
+		t.Fatalf("upstream accept = %q", acceptSeen)
+	}
+	if authorizationSeen != "Bearer api-token" {
+		t.Fatalf("upstream authorization = %q", authorizationSeen)
+	}
+}
+
 func TestFetchCoalescesConcurrentRequests(t *testing.T) {
 	var hits atomic.Int32
 

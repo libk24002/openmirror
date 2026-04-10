@@ -4,6 +4,9 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/textproto"
+	"sort"
+	"strings"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -12,6 +15,12 @@ import (
 type Client struct {
 	httpClient *http.Client
 	group      singleflight.Group
+}
+
+type Request struct {
+	Method  string
+	URL     string
+	Headers http.Header
 }
 
 type fetchResult struct {
@@ -27,7 +36,12 @@ func NewClient(timeout time.Duration) *Client {
 }
 
 func (c *Client) Fetch(ctx context.Context, url string) (int, http.Header, []byte, error) {
-	resultCh := c.group.DoChan(url, func() (interface{}, error) {
+	return c.FetchRequest(ctx, Request{Method: http.MethodGet, URL: url})
+}
+
+func (c *Client) FetchRequest(ctx context.Context, request Request) (int, http.Header, []byte, error) {
+	normalized := normalizeRequest(request)
+	resultCh := c.group.DoChan(singleflightKey(normalized), func() (interface{}, error) {
 		requestCtx := context.Background()
 		cancel := func() {}
 		if timeout := c.httpClient.Timeout; timeout > 0 {
@@ -37,10 +51,11 @@ func (c *Client) Fetch(ctx context.Context, url string) (int, http.Header, []byt
 		}
 		defer cancel()
 
-		req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, url, nil)
+		req, err := http.NewRequestWithContext(requestCtx, normalized.Method, normalized.URL, nil)
 		if err != nil {
 			return nil, err
 		}
+		req.Header = normalized.Headers.Clone()
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -73,4 +88,42 @@ func (c *Client) Fetch(ctx context.Context, url string) (int, http.Header, []byt
 
 		return fetch.statusCode, fetch.headers.Clone(), body, nil
 	}
+}
+
+func normalizeRequest(request Request) Request {
+	method := strings.ToUpper(strings.TrimSpace(request.Method))
+	if method == "" {
+		method = http.MethodGet
+	}
+
+	return Request{
+		Method:  method,
+		URL:     request.URL,
+		Headers: request.Headers.Clone(),
+	}
+}
+
+func singleflightKey(request Request) string {
+	normalizedHeaders := make(map[string][]string, len(request.Headers))
+	headerNames := make([]string, 0, len(request.Headers))
+
+	for key, values := range request.Headers {
+		canonical := textproto.CanonicalMIMEHeaderKey(key)
+		if _, exists := normalizedHeaders[canonical]; !exists {
+			headerNames = append(headerNames, canonical)
+		}
+		normalizedHeaders[canonical] = append(normalizedHeaders[canonical], values...)
+	}
+
+	sort.Strings(headerNames)
+
+	parts := make([]string, 0, 2+len(headerNames))
+	parts = append(parts, request.Method, request.URL)
+	for _, name := range headerNames {
+		values := append([]string(nil), normalizedHeaders[name]...)
+		sort.Strings(values)
+		parts = append(parts, name+"="+strings.Join(values, ","))
+	}
+
+	return strings.Join(parts, "\n")
 }

@@ -3,6 +3,7 @@ package mirror
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -48,5 +49,137 @@ func TestHandlerMissThenHit(t *testing.T) {
 
 	if got := upstreamHits.Load(); got != 1 {
 		t.Fatalf("upstream hit count = %d, want %d", got, 1)
+	}
+}
+
+func TestHandlerForwardsHEADMethod(t *testing.T) {
+	var upstreamHits atomic.Int32
+	var gotMethod string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		gotMethod = r.Method
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	c := cache.NewFSCache(t.TempDir())
+	h := NewHandler(c, upstream.URL, time.Minute)
+
+	req := httptest.NewRequest(http.MethodHead, "/v2/library/alpine/manifests/latest", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if gotMethod != http.MethodHead {
+		t.Fatalf("upstream method = %q, want %q", gotMethod, http.MethodHead)
+	}
+	if got := upstreamHits.Load(); got != 1 {
+		t.Fatalf("upstream hit count = %d, want %d", got, 1)
+	}
+}
+
+func TestHandlerForwardsQueryString(t *testing.T) {
+	querySeen := ""
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		querySeen = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	c := cache.NewFSCache(t.TempDir())
+	h := NewHandler(c, upstream.URL, time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/tags/list?n=5&last=sha256%3Aabc", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if querySeen != "n=5&last=sha256%3Aabc" {
+		t.Fatalf("upstream query = %q, want %q", querySeen, "n=5&last=sha256%3Aabc")
+	}
+}
+
+func TestHandlerForwardsAcceptAndAuthorizationHeaders(t *testing.T) {
+	acceptSeen := ""
+	authorizationSeen := ""
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		acceptSeen = r.Header.Get("Accept")
+		authorizationSeen = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	c := cache.NewFSCache(t.TempDir())
+	h := NewHandler(c, upstream.URL, time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
+	req.Header.Set("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if acceptSeen != "application/vnd.docker.distribution.manifest.v2+json" {
+		t.Fatalf("upstream accept = %q, want %q", acceptSeen, "application/vnd.docker.distribution.manifest.v2+json")
+	}
+	if authorizationSeen != "Bearer test-token" {
+		t.Fatalf("upstream authorization = %q, want %q", authorizationSeen, "Bearer test-token")
+	}
+}
+
+func TestHandlerCacheKeyVariesByMethodQueryAndAccept(t *testing.T) {
+	var upstreamHits atomic.Int32
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		_, _ = w.Write([]byte(strings.Join([]string{r.Method, r.URL.RawQuery, r.Header.Get("Accept")}, "|")))
+	}))
+	defer upstream.Close()
+
+	c := cache.NewFSCache(t.TempDir())
+	h := NewHandler(c, upstream.URL, time.Minute)
+
+	firstReq := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest?ref=latest", nil)
+	firstReq.Header.Set("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+	firstRec := httptest.NewRecorder()
+	h.ServeHTTP(firstRec, firstReq)
+
+	secondReq := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest?ref=latest", nil)
+	secondReq.Header.Set("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+	secondRec := httptest.NewRecorder()
+	h.ServeHTTP(secondRec, secondReq)
+
+	thirdReq := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest?ref=latest", nil)
+	thirdReq.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json")
+	thirdRec := httptest.NewRecorder()
+	h.ServeHTTP(thirdRec, thirdReq)
+
+	fourthReq := httptest.NewRequest(http.MethodHead, "/v2/library/alpine/manifests/latest?ref=latest", nil)
+	fourthReq.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json")
+	fourthRec := httptest.NewRecorder()
+	h.ServeHTTP(fourthRec, fourthReq)
+
+	if firstRec.Body.String() != secondRec.Body.String() {
+		t.Fatalf("expected identical cache hit body, got %q and %q", firstRec.Body.String(), secondRec.Body.String())
+	}
+	if thirdRec.Body.String() == secondRec.Body.String() {
+		t.Fatalf("expected varied Accept to bypass cache, got %q", thirdRec.Body.String())
+	}
+	if fourthRec.Code != http.StatusOK {
+		t.Fatalf("fourth status = %d, want %d", fourthRec.Code, http.StatusOK)
+	}
+	if got := upstreamHits.Load(); got != 3 {
+		t.Fatalf("upstream hit count = %d, want %d", got, 3)
 	}
 }
